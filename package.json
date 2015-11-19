@@ -1,0 +1,18 @@
+{
+  "name": "com.daplie.dns.api",
+  "version": "1.0.0",
+  "description": "",
+  "main": "wrapper.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git@bitbucket.org:daplie/dyndns-http-api.git"
+  },
+  "author": "AJ ONeal",
+  "license": "Apache-2.0"
+}
