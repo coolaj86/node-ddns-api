@@ -26,8 +26,6 @@ function cnMatch(pat, sub) {
 }
 
 exports.create = function (conf, DnsStore, app) {
-  //console.log('conf');
-  //console.log(conf);
   var pubPem = conf.pubkey; // conf.keypair.toPublicPem();
 
   function ddnsTokenWall(req, res, next) {
@@ -73,6 +71,7 @@ exports.create = function (conf, DnsStore, app) {
     var update;
     var err;
     var updatedAt = new Date().toISOString();
+    var zone;
 
     query = url.parse(req.url, true).query;
     if (query.key || query.name || query.hostname) {
@@ -124,10 +123,29 @@ exports.create = function (conf, DnsStore, app) {
         return false;
       }
 
+      // TODO this only works for 4+ character domains
+      // example.com
+      // example.co.uk
+      // example.com.au
+      // abc.com.au // fail
+      //update.host.replace(/^.*?\.([^\.]{4,})(\.[^\.]{2,3})?(\.[^\.]{2,})$/, "$1$2$3")
+
+      // How can we get all of these cases right?
+      // o.co             => o.co
+      // ba.fo.ex.co.uk   => ex.co.uk
+      // ba.fo.ex.com.au  => ex.com.au
+      // ba.fo.ex.com     => ex.cam
+
+      // simplest solution: we ignore .co.uk, .com.au, .co.in, etc
+      zone = update.host.split('.').slice(-2).join('.');
+
       domain = {
         host : update.host
+      , zone: zone
+      //, zone:
       , name : update.host
       , type: update.type || 'A' //dns.consts.NAME_TO_QTYPE[update.type || 'A'],
+      , value : update.value
       , values : update.answers
       , answers : update.answers
       , ttl : update.ttl
@@ -145,17 +163,36 @@ exports.create = function (conf, DnsStore, app) {
     promise = PromiseA.resolve();
     domains.forEach(function (domain, i) {
       promise = promise.then(function () {
-        var id = domain.type + ':' + domain.name + ':' + (domain.device || '');
-        domain.id = require('crypto').createHash('sha1').update(id).digest('base64').replace(/=+/g, '');
+        var id;
+
+        // one per device
+        if (-1 !== ['A', 'AAAA'].indexOf(domain.type)) {
+          id = domain.type
+            + ':' + domain.name
+            + ':' + (domain.device || '')
+            ;
+        }
+        // one per value (per zone?)
+        else /*if (-1 !== ['MX', 'CNAME', 'ANAME', 'TXT'].indexOf(domain.type))*/ {
+          id = domain.type
+            + ':' + domain.name
+            + ':' + (domain.value || (domain.answers && domain.answers[0] || ''))
+            ;
+        }
+
+        domain.id = require('crypto').createHash('sha1').update(id).digest('base64')
+          .replace(/=+/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+
         return DnsStore.Domains.upsert(domain.id, domain).then(function () {
           updates[i] = {
             type: domain.type
-          , name: domain.host
+          , name: (domain.zone !== domain.host) ? domain.host : ''
           , value: domain.value || (domain.answers && domain.answers[0] || undefined)
           , ttl: domain.ttl
           , priority: domain.priority
           , updatedAt: updatedAt
           , device: domain.device // TODO use global
+          , zone: domain.zone
           // 'zone', 'name', 'type', 'value', 'device'
           };
         }, function (/*err*/) {
@@ -180,9 +217,10 @@ exports.create = function (conf, DnsStore, app) {
     });
   }
 
+  // /api/<<package-api-name>>/<<version>>
+
   // server, store, host, port, publicDir, options
-  app.get('/api/dns/public', function (req, res) {
-    //console.log('[LOG DNS API]', req.method, req.url);
+  app.get('/public', function (req, res) {
     DnsStore.Domains.find(null, { limit: 500 }).then(function (rows) {
       rows.forEach(function (row) {
         Object.keys(row).forEach(function (key) {
@@ -194,8 +232,8 @@ exports.create = function (conf, DnsStore, app) {
       res.send(rows);
     });
   });
-  app.post('/api/dns/', expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
-  app.post('/api/ddns', expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
+  app.post('/dns/', expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
+  app.post('/ddns', expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
 
   return app;
 };
