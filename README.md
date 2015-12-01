@@ -1,9 +1,9 @@
-Node.js DynDNS API
+Node.js DDNS API
 ======
 
-**STOP:** You probably want [node-dyndns](https://github.com/Daplie/node-dyndns)
+**STOP:** You probably want [node-ddns](https://github.com/Daplie/node-ddns)
 
-A Dynamic DNS (DDNS / DynDNS) api written in node.js.
+A Dynamic DNS (DDNS / DynDNS) API written in node.js.
 
 This is one distinct part of a 3-part system.
 
