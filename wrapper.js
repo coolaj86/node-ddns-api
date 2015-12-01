@@ -5,7 +5,7 @@ module.exports.create = function (conf, deps, app) {
   //var PromiseA = deps.Promise;
   //var Kv = deps.memstore;
   //var Sqlstore = deps.sqlstores.config;
-  var wrap = require('dbwrap');
+  var wrap = require('masterquest-sqlite3');
   var dir = [
     // TODO consider zones separately from domains
     // i.e. jake.smithfamily.com could be owned by jake alone
