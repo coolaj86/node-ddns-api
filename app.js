@@ -217,22 +217,33 @@ exports.create = function (conf, DnsStore, app) {
         domain.id = require('crypto').createHash('sha1').update(id).digest('base64')
           .replace(/=+/g, '').replace(/\+/g, '-').replace(/\//g, '_');
 
-        if (!/.+@/.test(domain.email)) {
-          return PromiseA.reject({
-            message: "invalid email address format"
-          });
-        }
-
         return DnsStore.Domains.get(domain.id).then(function (oldDomain) {
-          if (oldDomain.email && oldDomain.email !== domain.email) {
-            return PromiseA.reject({
-              message: "already registered to a different email"
-            });
+          if (oldDomain) {
+            if (oldDomain.email && oldDomain.email !== domain.email) {
+              return PromiseA.reject({
+                message: "already registered to a different email"
+              });
+            }
           }
 
-          var hostname = domain.email.replace(/.*@/, '');
+          var p2;
+          var hostname;
 
-          return checkMx(hostname).then(function () {
+          if (domain.email) {
+            if (!/.+@/.test(domain.email)) {
+              p2 = PromiseA.reject({
+                message: "invalid email address format"
+              });
+            } else {
+              hostname = domain.email.replace(/.*@/, '');
+              p2 = checkMx(hostname);
+            }
+          } else {
+            p2 = PromiseA.resolve();
+          }
+
+
+          return p2.then(function () {
 
             return DnsStore.Domains.upsert(domain.id, domain).then(function () {
               updates[i] = {
@@ -254,7 +265,9 @@ exports.create = function (conf, DnsStore, app) {
             });
           }, function (err) {
             updates[i] = {
-              error: { message: "mx error for '" + domain.email + "': " + (err.message || err.code) }
+              error: {
+                message: "mx error for '" + domain.email + "': " + (err.message || err.code)
+              }
             };
           });
         }, function (/*err*/) {
@@ -263,9 +276,16 @@ exports.create = function (conf, DnsStore, app) {
             error: { message: "db error for '" + domain.name + "'" }
           };
         });
+      }).then(function () {
+        // Promise Hack
+        // because we're looping this promise and an error may occur
+        // in the body of the promise, we catch catch it's errors in
+        // that error handler.
+        // Instead we ignore this body and handle the error with the
+        // next handler.
       }, function (err) {
         updates[i] = {
-          error: { message: "unknown error '" + domain.name + "': " + (err.message || err.code) }
+          error: { message: (err.message || err.code || err.toString().split('\n')[0]) }
         };
       });
     });
