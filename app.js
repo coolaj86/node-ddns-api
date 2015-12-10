@@ -1,10 +1,32 @@
 'use strict';
 
-var PromiseA = require('bluebird').Promise;
+var PromiseA = require('bluebird');
 var jwt = PromiseA.promisifyAll(require('jsonwebtoken'));
 var expressJwt = require('express-jwt');
-var url = require('url');
+//var url = require('url');
 var ndns = require('native-dns');
+
+function checkMx(hostname) {
+  return new PromiseA(function (resolve, reject) {
+    require('dns').resolve(hostname, 'MX', function (err, records) {
+      if (err) {
+        reject({
+          message: "invalid mx (email) lookup"
+        });
+        return;
+      }
+
+      if (!records.length) {
+        reject({
+          message: "no mx (email) records"
+        });
+        return;
+      }
+
+      resolve();
+    });
+  });
+}
 
 function cnMatch(pat, sub) {
   var bare = pat.replace(/^\*\./, '');
@@ -70,6 +92,11 @@ exports.create = function (conf, DnsStore, app) {
             err = entry.name + '@' + entry.device;
             return false;
           }
+        }
+
+        if ('anonymous' === token.device && !entry.email) {
+          err = entry.name + ':E_EMAIL_REQUIRED';
+          return false;
         }
 
         return true;
@@ -156,6 +183,7 @@ exports.create = function (conf, DnsStore, app) {
       , ttl : update.ttl
       , priority: update.priority
       , device: update.device
+      , email: update.email
       };
 
       domains.push(domain);
@@ -189,24 +217,56 @@ exports.create = function (conf, DnsStore, app) {
         domain.id = require('crypto').createHash('sha1').update(id).digest('base64')
           .replace(/=+/g, '').replace(/\+/g, '-').replace(/\//g, '_');
 
-        return DnsStore.Domains.upsert(domain.id, domain).then(function () {
-          updates[i] = {
-            type: domain.type
-          , name: (domain.zone !== domain.host) ? domain.host : ''
-          , value: domain.value
-          , ttl: domain.ttl
-          , priority: domain.priority
-          , updatedAt: updatedAt
-          , device: domain.device // TODO use global
-          , zone: domain.zone
-          // 'zone', 'name', 'type', 'value', 'device'
-          };
+        if (!/.+@/.test(domain.email)) {
+          return PromiseA.reject({
+            message: "invalid email address format"
+          });
+        }
+
+        return DnsStore.Domains.get(domain.id).then(function (oldDomain) {
+          if (oldDomain.email && oldDomain.email !== domain.email) {
+            return PromiseA.reject({
+              message: "already registered to a different email"
+            });
+          }
+
+          var hostname = domain.email.replace(/.*@/, '');
+
+          return checkMx(hostname).then(function () {
+
+            return DnsStore.Domains.upsert(domain.id, domain).then(function () {
+              updates[i] = {
+                type: domain.type
+              , name: (domain.zone !== domain.host) ? domain.host : ''
+              , value: domain.value
+              , ttl: domain.ttl
+              , priority: domain.priority
+              , updatedAt: updatedAt
+              , device: domain.device // TODO use global
+              , zone: domain.zone
+              // 'zone', 'name', 'type', 'value', 'device'
+              };
+            }, function (/*err*/) {
+              // TODO trigger logger
+              updates[i] = {
+                error: { message: "db error for '" + domain.name + "'" }
+              };
+            });
+          }, function (err) {
+            updates[i] = {
+              error: { message: "mx error for '" + domain.email + "': " + (err.message || err.code) }
+            };
+          });
         }, function (/*err*/) {
           // TODO trigger logger
           updates[i] = {
             error: { message: "db error for '" + domain.name + "'" }
           };
         });
+      }, function (err) {
+        updates[i] = {
+          error: { message: "unknown error '" + domain.name + "': " + (err.message || err.code) }
+        };
       });
     });
 
@@ -220,6 +280,11 @@ exports.create = function (conf, DnsStore, app) {
 
     promise.then(function () {
       res.send(updates);
+    }, function (err) {
+      updates.push({
+        error: { message: (err.message || err.code || err.toString().split('\n')[0]) }
+      });
+      res.send(updates);
     });
   }
 
@@ -230,6 +295,8 @@ exports.create = function (conf, DnsStore, app) {
     DnsStore.Domains.find(null, { limit: 500 }).then(function (rows) {
       rows.forEach(function (row) {
         Object.keys(row).forEach(function (key) {
+          // don't expose email addresses
+          row.email = undefined;
           if (null === row[key] || '' === row[key]) {
             row[key] = undefined;
           }
