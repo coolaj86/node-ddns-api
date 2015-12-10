@@ -29,27 +29,46 @@ exports.create = function (conf, DnsStore, app) {
   var pubPem = conf.pubkey; // conf.keypair.toPublicPem();
 
   function ddnsTokenWall(req, res, next) {
-    var domains = req.body && req.body.domains || req.body;
-    var tokens;
+    var body = req.body;
+    var domains = body && (body.records || body.domains) || body;
+    var tokens = body && body.tokens || body;
     var err;
 
-    tokens = (req.body && req.body.tokens || [(req.headers.authorization||'').replace(/Bearer\s+/, '')])
-      .map(function (token) {
-        try {
-          return jwt.verify(token, pubPem);
-        } catch(e) {
-          return null;
-        }
-      }).filter(function (token) {
-        return token;
-      });
+    if (!Array.isArray(domains)) {
+      res.send({ error: { message: "malformed request" } });
+      return;
+    }
+
+    tokens = tokens.map(function (token) {
+      token = token && token.token || token;
+
+      try {
+        return jwt.verify(token, pubPem);
+      } catch(e) {
+        return null;
+      }
+
+    }).filter(function (token) {
+      return token;
+    });
 
     if (!domains.every(function (entry) {
       // TODO if token exists at entry.token, validate by that token
       return tokens.some(function (token) {
-        if (!cnMatch(token.cn, entry.name)) {
+
+        if (!token.cn || !cnMatch(token.cn, entry.name)) {
           err = entry.name;
           return false;
+        }
+
+        if (token.device) {
+          if (!entry.device) {
+            entry.device = token.device;
+          }
+          else if (entry.device !== token.device) {
+            err = entry.name + ' (not authorized for device `' + entry.device + '`)';
+            return false;
+          }
         }
 
         return true;
@@ -65,27 +84,15 @@ exports.create = function (conf, DnsStore, app) {
   function ddnsUpdater(req, res) {
     var promise;
     var domains = [];
-    var query;
     var domain;
     var updates;
-    var update;
     var err;
     var updatedAt = new Date().toISOString();
     var zone;
 
-    query = url.parse(req.url, true).query;
-    if (query.key || query.name || query.hostname) {
-      update = query;
-      updates = [query];
-    }
-    if (Array.isArray(req.body)) {
-      update = null;
-      updates = req.body;
-    }
+    updates = req.body && req.body.records || req.body;
 
-    if (!updates || !updates.length) {
-      console.error(query);
-      console.error(req.body);
+    if (!Array.isArray(updates)) {
       res.send({ error: { message:
         'usage: POST [{ "name": "example.com", "value": "127.0.0.1", "ttl": 300, "type": "A" }]'
       } });
@@ -100,10 +107,9 @@ exports.create = function (conf, DnsStore, app) {
 
       // TODO BUG XXX must test if address is ipv4 or ipv6
       // (my comcast connection is ipv6)
-      update.answer = update.answer || update.value || update.address || update.ip || update.myip
-        || req.connection.remoteAddress
+      update.value = update.value || update.answer || update.address || update.ip || update.myip
+        || req.ip || req.connection.remoteAddress
         ;
-      update.answers = Array.isArray(update.answers) && update.answers || [update.answer];
       if (update.ttl) {
         update.ttl = parseInt(update.ttl, 10);
       }
@@ -118,7 +124,7 @@ exports.create = function (conf, DnsStore, app) {
         return false;
       }
 
-      if (!update.answer) {
+      if (!update.value) {
         err = { error: { message: "missing key (hostname) and or value (ip)" } };
         return false;
       }
@@ -144,12 +150,11 @@ exports.create = function (conf, DnsStore, app) {
       , zone: zone
       //, zone:
       , name : update.host
-      , type: update.type || 'A' //dns.consts.NAME_TO_QTYPE[update.type || 'A'],
+      , type: (update.type || 'A').toUpperCase() //dns.consts.NAME_TO_QTYPE[update.type || 'A'],
       , value : update.value
-      , values : update.answers
-      , answers : update.answers
       , ttl : update.ttl
       , priority: update.priority
+      , device: update.device
       };
 
       domains.push(domain);
@@ -176,7 +181,7 @@ exports.create = function (conf, DnsStore, app) {
         else /*if (-1 !== ['MX', 'CNAME', 'ANAME', 'TXT'].indexOf(domain.type))*/ {
           id = domain.type
             + ':' + domain.name
-            + ':' + (domain.value || (domain.answers && domain.answers[0] || ''))
+            + ':' + domain.value
             ;
         }
 
@@ -187,7 +192,7 @@ exports.create = function (conf, DnsStore, app) {
           updates[i] = {
             type: domain.type
           , name: (domain.zone !== domain.host) ? domain.host : ''
-          , value: domain.value || (domain.answers && domain.answers[0] || undefined)
+          , value: domain.value
           , ttl: domain.ttl
           , priority: domain.priority
           , updatedAt: updatedAt
@@ -213,7 +218,7 @@ exports.create = function (conf, DnsStore, app) {
     */
 
     promise.then(function () {
-      res.send(update || updates);
+      res.send(updates);
     });
   }
 
