@@ -1,5 +1,5 @@
 {
-  "name": "com.daplie.dns.api",
+  "name": "com.daplie.ddns.api",
   "version": "1.0.0",
   "description": "",
   "main": "wrapper.js",
@@ -11,8 +11,8 @@
   },
   "repository": {
     "type": "git",
-    "url": "git@bitbucket.org:daplie/dyndns-http-api.git"
+    "url": "git@github.com:Daplie/node-ddns-api.git"
   },
   "author": "AJ ONeal",
-  "license": "Apache-2.0"
+  "license": "(MIT OR Apache-2.0)"
 }

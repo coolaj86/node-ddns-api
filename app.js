@@ -27,6 +27,7 @@ function cnMatch(pat, sub) {
 
 exports.create = function (conf, DnsStore, app) {
   var pubPem = conf.pubkey; // conf.keypair.toPublicPem();
+  var apiBase = conf.apiBase || '';
 
   function ddnsTokenWall(req, res, next) {
     var body = req.body;
@@ -66,7 +67,7 @@ exports.create = function (conf, DnsStore, app) {
             entry.device = token.device;
           }
           else if (entry.device !== token.device) {
-            err = entry.name + ' (not authorized for device `' + entry.device + '`)';
+            err = entry.name + '@' + entry.device;
             return false;
           }
         }
@@ -225,7 +226,7 @@ exports.create = function (conf, DnsStore, app) {
   // /api/<<package-api-name>>/<<version>>
 
   // server, store, host, port, publicDir, options
-  app.get('/public', function (req, res) {
+  app.get(apiBase + '/public', function (req, res) {
     DnsStore.Domains.find(null, { limit: 500 }).then(function (rows) {
       rows.forEach(function (row) {
         Object.keys(row).forEach(function (key) {
@@ -237,8 +238,8 @@ exports.create = function (conf, DnsStore, app) {
       res.send(rows);
     });
   });
-  app.post('/dns/', expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
-  app.post('/ddns', expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
+  app.post(apiBase + '/dns/', expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
+  app.post(apiBase + '/ddns', expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
 
   return app;
 };
