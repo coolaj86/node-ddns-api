@@ -84,6 +84,11 @@ exports.create = function (conf, DnsStore, app) {
           return false;
         }
 
+        entry.registered = '';
+        if (token.registered) {
+          entry.registered = token.registered;
+        }
+
         if (token.device) {
           if (!entry.device) {
             entry.device = token.device;
@@ -172,6 +177,10 @@ exports.create = function (conf, DnsStore, app) {
 
       // simplest solution: we ignore .co.uk, .com.au, .co.in, etc
       zone = update.host.split('.').slice(-2).join('.');
+      // TODO use tld, private tld, and public suffix lists
+      if ('daplie.me' === zone && update.host.replace(/^www\./i, '') !== 'daplie.me') {
+        zone = update.host.split('.').slice(-3).join('.');
+      }
 
       domain = {
         host : update.host
@@ -184,6 +193,8 @@ exports.create = function (conf, DnsStore, app) {
       , priority: update.priority
       , device: update.device
       , email: update.email
+      , registered: update.registered
+      , destroy: update.destroy
       };
 
       domains.push(domain);
@@ -219,10 +230,22 @@ exports.create = function (conf, DnsStore, app) {
 
         return DnsStore.Domains.get(domain.id).then(function (oldDomain) {
           if (oldDomain) {
-            if (oldDomain.email && oldDomain.email !== domain.email) {
-              return PromiseA.reject({
-                message: "already registered to a different email"
-              });
+            if (oldDomain.registered) {
+              if (!domain.registered) {
+                return PromiseA.reject({
+                  message: "domain is registered via https://daplie.domains Please `npm install -g install daplie-tools` and use `daplie devices:update` instead"
+                });
+              }
+            }
+            else {
+              if (!/\-/.test(domain.name)) {
+                // TODO reserve non-hyphenated (non-random) domains for registered users
+              }
+              if (oldDomain.email && oldDomain.email !== domain.email) {
+                return PromiseA.reject({
+                  message: "already registered to a different email"
+                });
+              }
             }
           }
 
@@ -245,6 +268,16 @@ exports.create = function (conf, DnsStore, app) {
 
           return p2.then(function () {
 
+            if (domain.destroy) {
+              return DnsStore.Domains.destroy(domain.id).then(function () {
+              }, function (/*err*/) {
+                // TODO trigger logger
+                updates[i] = {
+                  error: { message: "db error for destroy '" + domain.name + "'" }
+                };
+              });
+            }
+
             return DnsStore.Domains.upsert(domain.id, domain).then(function () {
               updates[i] = {
                 type: domain.type
@@ -255,6 +288,7 @@ exports.create = function (conf, DnsStore, app) {
               , updatedAt: updatedAt
               , device: domain.device // TODO use global
               , zone: domain.zone
+              , registered: domain.registered
               // 'zone', 'name', 'type', 'value', 'device'
               };
             }, function (/*err*/) {
@@ -314,8 +348,11 @@ exports.create = function (conf, DnsStore, app) {
   app.get(apiBase + '/public', function (req, res) {
     DnsStore.Domains.find(null, { limit: 500 }).then(function (rows) {
       rows.forEach(function (row) {
-        Object.keys(row).forEach(function (key) {
-          // don't expose email addresses
+        Object.keys(row).filter(function (row) {
+          return !row.registered;
+        }).forEach(function (key) {
+          // don't expose idx or email addresses
+          row.accountIdx = undefined;
           row.email = undefined;
           if (null === row[key] || '' === row[key]) {
             row[key] = undefined;
@@ -325,6 +362,75 @@ exports.create = function (conf, DnsStore, app) {
       res.send(rows);
     });
   });
+
+  /*
+  function deviceUpdater(req, res) {
+  }
+
+  app.get(
+    apiBase + '/com.daplie.ddns/devices'
+  , expressJwt({ secret: pubPem })
+  , ddnsTokenWall
+  , getDevices
+  );
+  app.post(
+    apiBase + '/com.daplie.ddns/devices/:deviceId'
+  , expressJwt({ secret: pubPem })
+  , ddnsTokenWall
+  , deviceUpdater
+  );
+  */
+
+  app.get(
+    apiBase + '/records'
+  , expressJwt({ secret: pubPem })
+  , function (req, res) {
+      var token = (req.headers.authorization || req.query.token)
+        .replace(/^(Bearer|JWT|Token)\s*/i, '');
+      var data;
+      var bare;
+      var parts;
+      var zone;
+      var promise = PromiseA.resolve([]);
+
+      try {
+        data = jwt.verify(token, pubPem);
+      } catch(e) {
+        data = null;
+      }
+
+      if (!data) {
+        res.send({ error: { message: "invalid token" }});
+        return;
+      }
+
+      bare = data.cn.replace(/^\*\./, '');
+      parts = bare.split('.');
+
+      function getRecords(recs) {
+        if (recs.length) {
+          return recs;
+        }
+
+        return DnsStore.Domains.find({ zone: zone });
+      }
+
+      // /(^|\.)daplie.me$/i.test(bare) ? parts.length >= 3 :
+      while (parts.length >= 2) {
+        zone = parts.join('.');
+        parts.shift();
+        promise = promise.then(getRecords);
+      }
+
+      promise.then(function (records) {
+        res.send({ records: records.filter(function (record) {
+          return bare === record.name
+            || record.name.substr(record.name.length - ('.' + bare).length) === ('.' + bare);
+        }) });
+      });
+    }
+  );
+
   app.post(apiBase + '/dns/', expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
   app.post(apiBase + '/ddns', expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
 

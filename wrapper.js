@@ -11,18 +11,27 @@ module.exports.create = function (conf, deps, app) {
     // i.e. jake.smithfamily.com could be owned by jake alone
     { tablename: 'domains'
     , idname: 'id' // crypto random
-    , indices: ['createdAt', 'updatedAt', 'deletedAt', 'revokedAt', 'zone', 'name', 'type', 'value', 'device']
-    , hasMany: ['accounts', 'groups']
+    , indices: [
+        'createdAt', 'updatedAt', 'deletedAt', 'revokedAt'
+      , 'zone', 'name', 'type', 'value', 'device'
+      ]
+    , hasMany: [ 'accounts', 'groups' ]
     }
   , { tablename: 'accounts_domains'
     , idname: 'id'
-    , indices: ['createdAt', 'updatedAt', 'deletedAt', 'revokedAt', 'accountId']
-    , hasMany: ['accounts', 'domains']
+    , indices: [
+        'createdAt', 'updatedAt', 'deletedAt', 'revokedAt'
+      , 'accountIdx', 'zone'
+      ]
+    , hasMany: [ 'accounts', 'domains' ]
     }
   , { tablename: 'domains_groups'
     , idname: 'id'
-    , indices: ['createdAt', 'updatedAt', 'deletedAt', 'revokedAt', 'accountId']
-    , hasMany: ['domains', 'groups']
+    , indices: [
+        'createdAt', 'updatedAt', 'deletedAt', 'revokedAt'
+      , 'accountId', 'accountIdx'
+      ]
+    , hasMany: [ 'domains', 'groups' ]
     }
   ];
 
