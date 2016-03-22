@@ -13,7 +13,7 @@ module.exports.create = function (conf, deps, app) {
     , idname: 'id' // crypto random
     , indices: [
         'createdAt', 'updatedAt', 'deletedAt', 'revokedAt'
-      , 'zone', 'name', 'type', 'value', 'device'
+      , 'zone', 'name', 'type', 'value', 'device', 'groupIdx'
       ]
     , hasMany: [ 'accounts', 'groups' ]
     }
