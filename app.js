@@ -59,8 +59,6 @@ exports.create = function (conf, DnsStore, app) {
     return DnsStore.Domains.find({ device: '' }).then(function (d2) {
       var domains = d1.concat(d2);
 
-      console.log('DEBUG domains.length', domains.length);
-
       return PromiseA.all(domains.filter(function (d) {
         return !d.device;
       }).map(function (d) {
@@ -139,6 +137,13 @@ exports.create = function (conf, DnsStore, app) {
     next();
   }
 
+  /*
+  var Dns = { restful: {} };
+  Dns.restful.update = function (req, res) {
+  };
+  Dns.update = function (req, q) {
+  };
+  */
   function ddnsUpdater(req, res) {
     var promise;
     var domains = [];
@@ -162,6 +167,7 @@ exports.create = function (conf, DnsStore, app) {
         update.type = 'A';
       }
       update.host = update.host || update.key || update.name || update.hostname;
+      // console.log('DEBUG app.js update.host', update.host);
 
       // TODO BUG XXX must test if address is ipv4 or ipv6
       // (my comcast connection is ipv6)
@@ -367,27 +373,6 @@ exports.create = function (conf, DnsStore, app) {
     });
   }
 
-  // /api/<<package-api-name>>/<<version>>
-
-  // server, store, host, port, publicDir, options
-  app.get(apiBase + '/public', function (req, res) {
-    DnsStore.Domains.find(null, { limit: 500 }).then(function (rows) {
-      rows.forEach(function (row) {
-        Object.keys(row).filter(function (row) {
-          return !row.registered;
-        }).forEach(function (key) {
-          // don't expose idx or email addresses
-          row.accountIdx = undefined;
-          row.email = undefined;
-          if (null === row[key] || '' === row[key]) {
-            row[key] = undefined;
-          }
-        });
-      });
-      res.send(rows);
-    });
-  });
-
   /*
   function deviceUpdater(req, res) {
   }
@@ -466,10 +451,21 @@ exports.create = function (conf, DnsStore, app) {
       .replace(/=+/g, '').replace(/\+/g, '-').replace(/\//g, '_');
   }
 
-  Devices.update = function (req, res) {
-    var promise = PromiseA.resolve().then(function () {
-      var token = req.user;
-      var dev = req.body;
+  Devices.restful = {};
+  Devices.restful.update = function (req, res) {
+    var token = req.user;
+    var dev = req.body;
+
+    Devices.update(token, dev).then(function () {
+      res.send({ success: true });
+    }, function (err) {
+      console.error('Error: unexpected error in ddns/app.js');
+      console.error(err.stack || err);
+      res.send({ error: { message: 'INTERNAL ERROR (not your fault)' } });
+    });
+  };
+  Devices.update = function (token, dev) {
+    return PromiseA.resolve().then(function () {
       var addresses;
       var q = { device: dev.name, groupIdx: token.groupIdx };
       var deleters = [];
@@ -482,9 +478,12 @@ exports.create = function (conf, DnsStore, app) {
       if (!Array.isArray(dev.addresses) || !(dev.addresses[0]||{}).value) {
         return PromiseA.reject(new Error("Sanity Fail: uncheked addresses"));
       }
-      addresses = dev.addresses.map(function (addr) {
+      addresses = dev.addresses;
+      /*
+      .map(function (addr) {
         return addr.value;
       });
+      */
 
       return DnsStore.Domains.find(q).then(function (domains) {
         var domainsMap = {};
@@ -527,6 +526,7 @@ exports.create = function (conf, DnsStore, app) {
         });
 
         // either A (do nothing) or B (add and destroy)
+        // console.log('DEBUG app.js placers', placers);
         return PromiseA.all(placers.map(function (r) {
           return DnsStore.Domains.upsert(r);
         })).then(function () {
@@ -535,14 +535,6 @@ exports.create = function (conf, DnsStore, app) {
           }));
         });
       });
-    });
-
-    promise.then(function () {
-      res.send({ success: true });
-    }, function (err) {
-      console.error('Error: unexpected error in ddns/app.js');
-      console.error(err.stack || err);
-      res.send({ error: { message: 'INTERNAL ERROR (not your fault)' } });
     });
   };
 
@@ -574,13 +566,44 @@ exports.create = function (conf, DnsStore, app) {
     });
   };
 
-  app.get(   apiBase + '/records', expressJwt({ secret: pubPem }), Records.get);
-  app.post(  apiBase + '/records', expressJwt({ secret: pubPem }), Records.update);
-  app.post(  apiBase + '/devices', expressJwt({ secret: pubPem }), Devices.update);
-  app.delete(apiBase + '/devices/:name', expressJwt({ secret: pubPem }), Devices.destroy);
+  function listDomains(req, res) {
+    DnsStore.Domains.find(null, { limit: 1000 }).then(function (rows) {
+      rows = rows.filter(function (row) {
+        return true || !row.registered;
+      });
+      rows.forEach(function (row) {
+        // don't expose idx or email addresses
+        row.accountIdx = undefined;
+        row.email = undefined;
 
-  app.post(  apiBase + '/dns/', expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
-  app.post(  apiBase + '/ddns', expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
+        Object.keys(row).forEach(function (key) {
+          if (null === row[key] || '' === row[key]) {
+            row[key] = undefined;
+          }
+        });
+      });
+      res.send(rows);
+    });
+  }
+
+  function logr(req, res, next) {
+    //console.log('DEBUG app.js [logger]', req.method, req.url, Object.keys(req.headers).join(','));
+    next();
+  }
+
+  // /api/<<package-api-name>>/<<version>>
+
+  // server, store, host, port, publicDir, options
+  app.get(   apiBase + '/public', logr, listDomains);
+
+  app.get(   apiBase + '/records', logr, expressJwt({ secret: pubPem }), Records.get);
+  app.post(  apiBase + '/records', logr, expressJwt({ secret: pubPem }), Records.update);
+
+  app.post(  apiBase + '/devices', logr, expressJwt({ secret: pubPem }), Devices.restful.update);
+  app.delete(apiBase + '/devices/:name', logr, expressJwt({ secret: pubPem }), Devices.destroy);
+
+  app.post(  apiBase + '/dns/', logr, expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
+  app.post(  apiBase + '/ddns', logr, expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
 
   return app;
 };
