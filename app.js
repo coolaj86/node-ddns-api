@@ -5,6 +5,7 @@ var jwt = PromiseA.promisifyAll(require('jsonwebtoken'));
 var expressJwt = require('express-jwt');
 //var url = require('url');
 var ndns = require('native-dns');
+//var rtypes = [ 'A', 'AAAA', 'ANAME', 'CNAME', 'MX', 'SRV', 'TXT' ];
 
 function checkMx(hostname) {
   return new PromiseA(function (resolve, reject) {
@@ -51,8 +52,8 @@ exports.create = function (conf, DnsStore, app) {
   var ANON = 'anonymous';
   var pubPem = conf.pubkey; // conf.keypair.toPublicPem();
   var apiBase = conf.apiBase || '';
-  var Records = {};
-  var Devices = {};
+  var Records = { restful: {} };
+  var Devices = { restful: {} };
 
   // UPGRADE ONLY
   DnsStore.Domains.find({ device: null }).then(function (d1) {
@@ -70,7 +71,7 @@ exports.create = function (conf, DnsStore, app) {
 
   function ddnsTokenWall(req, res, next) {
     var body = req.body;
-    var domains = body && (body.records || body.domains) || body;
+    var domains = getUpdateRecords(req);
     var tokens = body && body.tokens || body;
     var err;
 
@@ -144,16 +145,13 @@ exports.create = function (conf, DnsStore, app) {
   Dns.update = function (req, q) {
   };
   */
-  function ddnsUpdater(req, res) {
-    var promise;
-    var domains = [];
-    var domain;
-    var updates;
-    var err;
-    var updatedAt = new Date().toISOString();
-    var zone;
+  function getUpdateRecords(req) {
+    return req.body && (req.body.records || req.body.domains) || req.body;
+  }
 
-    updates = req.body && req.body.records || req.body;
+  function ddnsUpdater(req, res) {
+    var domains = getUpdateRecords(req);
+    var updates = getUpdateRecords(req);
 
     if (!Array.isArray(updates)) {
       res.send({ error: { message:
@@ -162,7 +160,28 @@ exports.create = function (conf, DnsStore, app) {
       return;
     }
 
+    if (domains[0].registered) {
+      return ddnsUpdaterNew(req, res, updates);
+    } else {
+      // ddns
+      return ddnsUpdaterOld(req, res, updates);
+    }
+  }
+
+  function ddnsUpdaterNew(req, res, updates) {
+    console.log('DEBUG ddnsUpdaterNew');
+    var promise;
+    var domains = [];
+    var domain;
+    var err;
+    var updatedAt = new Date().toISOString();
+    var zone;
+
     if (!updates.every(function (update) {
+      if (!update.registered) {
+        err = new Error('Cannot mix old-style unregistered domains with new-style registered domains');
+        return false;
+      }
       if (!update.type) {
         update.type = 'A';
       }
@@ -240,72 +259,247 @@ exports.create = function (conf, DnsStore, app) {
     promise = PromiseA.resolve();
     domains.forEach(function (domain, i) {
       promise = promise.then(function () {
-        var id;
-
-        // one per device
-        if (-1 !== ['A', 'AAAA'].indexOf(domain.type)) {
-          id = domain.type
-            + ':' + domain.name
-            + ':' + (domain.device || ANON)
-            ;
-        }
-        // one per value (per zone?)
-        else /*if (-1 !== ['MX', 'CNAME', 'ANAME', 'TXT'].indexOf(domain.type))*/ {
-          id = domain.type
-            + ':' + domain.name
-            + ':' + domain.value
-            ;
-        }
-
-        domain.id = require('crypto').createHash('sha1').update(id).digest('base64')
-          .replace(/=+/g, '').replace(/\+/g, '-').replace(/\//g, '_');
+        domain.id = getDomainId(domain);
 
         return DnsStore.Domains.find({ zone: domain.zone }).then(function (oldDomains) {
           var registered = oldDomains.some(function (d) { return d.registered; });
-          var oldDomain = oldDomains.filter(function (d) { return domain.id === d.id; })[0];
-          var p2;
-          var hostname;
 
-          if (registered && !domain.registered) {
+          if (oldDomains.length && !registered) {
             return PromiseA.reject({
-              message: "domain is registered via https://daplie.domains Please `npm install -g install daplie-tools` and use `daplie devices:update` instead"
+              message: "Error: This domain was registered with `ddns` which is available via `npm install -g ddns`."
+                + " It cannot be used with `daplie` yet and must be converted manually."
+                + " Open an issue at https://github.com/Daplie/daplie-tools for help."
             });
           }
 
-          if (oldDomain) {
-            if (oldDomain.email && oldDomain.email !== domain.email) {
+          if (domain.destroy) {
+            return DnsStore.Domains.destroy(domain.id).then(function () {
+              return null;
+            }, function (/*err*/) {
+              // TODO trigger logger
+              updates[i] = {
+                error: { message: "db error for destroy '" + domain.name + "'" }
+              };
+            });
+          }
+
+          return DnsStore.Domains.upsert(domain.id, domain).then(function () {
+            updates[i] = {
+              type: domain.type
+            , name: (domain.zone !== domain.host) ? domain.host : ''
+            , value: domain.value
+            , ttl: domain.ttl
+            , priority: domain.priority
+            , updatedAt: updatedAt
+            , device: domain.device // TODO use global
+            , zone: domain.zone
+            , registered: domain.registered
+            , groupIdx: domain.groupIdx
+            // 'zone', 'name', 'type', 'value', 'device'
+            };
+          }, function (/*err*/) {
+            // TODO trigger logger
+            updates[i] = {
+              error: { message: "db error for '" + domain.name + "'" }
+            };
+          });
+        }, function (/*err*/) {
+          // TODO trigger logger
+          updates[i] = {
+            error: { message: "db error for '" + domain.name + "'" }
+          };
+        });
+      }).then(function () {
+        // Promise Hack
+        // because we're looping this promise and an error may occur
+        // in the body of the promise, we catch catch it's errors in
+        // that error handler.
+        // Instead we ignore this body and handle the error with the
+        // next handler.
+      }, function (err) {
+        updates[i] = {
+          error: { message: (err.message || err.code || err.toString().split('\n')[0]) }
+        };
+      });
+    });
+
+    /*
+    if (err) {
+      // TODO should differentiate between bad user data and server failure
+      res.status(500).send({ error: { message: err.message || err.toString() } });
+      return;
+    }
+    */
+
+    promise.then(function () {
+      res.send(updates);
+    }, function (err) {
+      updates.push({
+        error: { message: (err.message || err.code || err.toString().split('\n')[0]) }
+      });
+      res.send(updates);
+    });
+  }
+  //
+  // OLD
+  //
+  function ddnsUpdaterOld(req, res, updates) {
+    console.log('DEBUG ddnsUpdaterOld');
+    var promise;
+    var domains = [];
+    var domain;
+    var err;
+    var updatedAt = new Date().toISOString();
+    var zone;
+
+    if (!Array.isArray(updates)) {
+      res.send({ error: { message:
+        'usage: POST [{ "name": "example.com", "value": "127.0.0.1", "ttl": 300, "type": "A" }]'
+      } });
+      return;
+    }
+
+    console.log('DEBUG updates is an array', updates);
+
+    if (!updates.every(function (update) {
+      if (update.registered) {
+        err = new Error('Cannot mix old-style unregistered domains with new-style registered domains');
+        return false;
+      }
+      if (!update.type) {
+        update.type = 'A';
+      }
+      update.host = update.host || update.key || update.name || update.hostname;
+      // console.log('DEBUG app.js update.host', update.host);
+
+      // TODO BUG XXX must test if address is ipv4 or ipv6
+      // (my comcast connection is ipv6)
+      update.value = update.value || update.answer || update.address || update.ip || update.myip
+        || req.ip || req.connection.remoteAddress
+        ;
+      if (update.ttl) {
+        update.ttl = parseInt(update.ttl, 10);
+      }
+      if (!update.ttl) {
+        update.ttl = 300;
+      }
+      // TODO update.priority
+
+
+      if (!ndns.consts.NAME_TO_QTYPE[update.type.toString().toUpperCase()]) {
+        err = { error: { message: "unrecognized type '" + update.type + "'" } };
+        return false;
+      }
+
+      if (!update.value) {
+        err = { error: { message: "missing key (hostname) and or value (ip)" } };
+        return false;
+      }
+
+      // TODO this only works for 4+ character domains
+      // example.com
+      // example.co.uk
+      // example.com.au
+      // abc.com.au // fail
+      //update.host.replace(/^.*?\.([^\.]{4,})(\.[^\.]{2,3})?(\.[^\.]{2,})$/, "$1$2$3")
+
+      // How can we get all of these cases right?
+      // o.co             => o.co
+      // ba.fo.ex.co.uk   => ex.co.uk
+      // ba.fo.ex.com.au  => ex.com.au
+      // ba.fo.ex.com     => ex.cam
+
+      // simplest solution: we ignore .co.uk, .com.au, .co.in, etc
+      zone = update.host.split('.').slice(-2).join('.');
+      // TODO use tld, private tld, and public suffix lists
+      if ('daplie.me' === zone && update.host.replace(/^www\./i, '') !== 'daplie.me') {
+        zone = update.host.split('.').slice(-3).join('.');
+      }
+
+      domain = {
+        host : update.host
+      , zone: zone
+      //, zone:
+      , name : update.host
+      , type: (update.type || 'A').toUpperCase() //dns.consts.NAME_TO_QTYPE[update.type || 'A'],
+      , value : update.value
+      , ttl : update.ttl
+      , priority: update.priority
+      , device: update.device || ANON
+      , email: update.email
+      , destroy: update.destroy
+      };
+
+      domains.push(domain);
+
+      return true;
+    })) {
+      console.log('DEBUG err', err);
+      res.status(500).send(err);
+      return;
+    }
+
+    console.log('DEBUG updates are valid');
+    // console.log(updates);
+    //console.log('DEBUG domains', domains);
+
+    promise = PromiseA.resolve();
+    domains.forEach(function (domain, i) {
+      promise = promise.then(function () {
+        domain.id = getDomainId(domain, { old: true });
+
+        console.log('DEBUG domain.zone', domain.zone);
+        return DnsStore.Domains.find({ zone: domain.zone }).then(function (existingDomains) {
+          var registered = existingDomains.some(function (d) { return d.registered; });
+          var oldDomains = existingDomains.filter(function (d) { return (domain.host === d.name || domain.host === d.zone) && domain.type === d.type; });
+          var p2;
+          var hostname;
+
+          if (registered) {
+            return PromiseA.reject({
+              message: "Error: This domain was registered with https://daplie.domains via `daplie`."
+                + " Please `npm install -g install daplie-tools` and use `daplie devices:update` instead of `ddns`."
+                + " Open an issue at https://github.com/Daplie/daplie-tools for help."
+            });
+          }
+
+          console.log('DEBUG oldDomains', oldDomains);
+          if (oldDomains.length) {
+            // existing registration
+            if (oldDomains[0].email && (oldDomains[0].email !== domain.email)) {
               return PromiseA.reject({
                 message: "already registered to a different email"
               });
             }
-          } else if (!/\-/.test(domain.name)) {
-            // TODO reserve non-hyphenated (non-random) domains for registered users
           }
-
-          if (domain.email) {
-            if (!/.+@/.test(domain.email)) {
-              p2 = PromiseA.reject({
-                message: "invalid email address format"
-              });
-            } else {
-              hostname = domain.email.replace(/.*@/, '');
-              p2 = checkMx(hostname);
+          else {
+            // new registration
+            if (!/\-/.test(domain.name)) {
+              // TODO reserve non-hyphenated (non-random) domains for registered users
             }
-          } else {
-            p2 = PromiseA.resolve();
+
+            if (domain.email) {
+              if (!/.+@/.test(domain.email)) {
+                p2 = PromiseA.reject({
+                  message: "invalid email address format"
+                });
+              } else {
+                hostname = domain.email.replace(/.*@/, '');
+                p2 = checkMx(hostname);
+              }
+            }
           }
 
 
+          p2 = p2 || PromiseA.resolve();
           return p2.then(function () {
-
+            return PromiseA.all(oldDomains.map(function (d) {
+              return DnsStore.Domains.destroy(d.id);
+            }));
+          }).then(function () {
             if (domain.destroy) {
-              return DnsStore.Domains.destroy(domain.id).then(function () {
-              }, function (/*err*/) {
-                // TODO trigger logger
-                updates[i] = {
-                  error: { message: "db error for destroy '" + domain.name + "'" }
-                };
-              });
+              updates[i] = oldDomains[0];
+              return;
             }
 
             return DnsStore.Domains.upsert(domain.id, domain).then(function () {
@@ -391,14 +585,14 @@ exports.create = function (conf, DnsStore, app) {
   );
   */
 
-  Records.get = function (req, res) {
+  Records.restful.get = function (req, res) {
     var token = (req.headers.authorization || req.query.token)
       .replace(/^(Bearer|JWT|Token)\s*/i, '');
     var data;
     var bare;
     var parts;
-    var zone;
     var promise = PromiseA.resolve([]);
+    var first = true;
 
     try {
       data = jwt.verify(token, pubPem);
@@ -407,45 +601,140 @@ exports.create = function (conf, DnsStore, app) {
     }
 
     if (!data) {
-      res.send({ error: { message: "invalid token" }});
+      res.send({ error: { message: "invalid token", code: 'E_INVALID_TOKEN' }});
       return;
     }
 
+    data.cn = data.cn || '';
     bare = data.cn.replace(/^\*\./, '');
     parts = bare.split('.');
 
-    function getOtherRecords(recs) {
-      if (recs.length) {
-        return recs;
-      }
+    function getOtherRecords(zone, ignoreOwner) {
+      return function (recs) {
+        var query = {};
 
-      return DnsStore.Domains.find({ zone: zone });
+        if (recs.length) {
+          return recs;
+        }
+
+        if (zone) {
+          query.zone = zone;
+        }
+        if (!ignoreOwner && (data.groupIdx || data.accountIdx)) {
+          query.groupIdx = data.groupIdx || data.accountIdx;
+        }
+
+        //console.log('DEBUG query', query);
+        return DnsStore.Domains.find(query);
+      };
+    }
+
+    //console.log('DEBUG data', data);
+    //console.log('DEBUG parts', parts);
+
+    if (!data.cn) {
+      promise = promise.then(getOtherRecords(null));
     }
 
     // /(^|\.)daplie.me$/i.test(bare) ? parts.length >= 3 :
     while (parts.length >= 2) {
-      zone = parts.join('.');
+      //console.log('DEBUG zone', zone);
+      promise = promise.then(getOtherRecords(parts.join('.'), first));
+      first = false;
       parts.shift();
-      promise = promise.then(getOtherRecords);
     }
 
     promise.then(function (records) {
-      res.send({ records: records.filter(function (record) {
-        return bare === record.name
-          || record.name.substr(record.name.length - ('.' + bare).length) === ('.' + bare);
-      }) });
+      //console.log('DEBUG get records');
+      //console.log(data.cn);
+      //console.log(records);
+
+      if (data.cn) {
+        records = records.filter(function (record) {
+          return bare === record.name
+            || record.name.substr(record.name.length - ('.' + bare).length) === ('.' + bare);
+        });
+      }
+
+      res.send({ records: records });
+    }, function (err) {
+      console.error('ERROR app.js Records.get');
+      console.error(err.stack || err);
+      res.send({ error: { message: "unknown error" } });
     });
   };
-  Records.update = function (req, res) {
+  // Update
+  Records.restful.update = function (req, res) {
     res.send({ error: { message: "Not Implemented" } });
   };
+  Records.restful.destroy = function (req, res) {
+    /*
+    req.params.name
+    req.params.type
+    req.params.value
+    req.params.device?
+    */
+    Records.destroy(req, req.params).then(function (record) {
+      res.send(record);
+    }, function (err) {
+      console.error('ERROR app.js Records.destroy');
+      console.error(err.stack || err);
+      res.send({ error: { message: "unknown error" } });
+    });
+  };
+  Records.destroy = function (req, opts) {
+    // opts = { name, type, value, device };
+    var query = { name: opts.name, value: opts.value };
 
-  function getDomainId(domain) {
+    return DnsStore.Domains.find(query).then(function (devs) {
+      var id;
+
+      if (devs.length) {
+        id = devs[0].id;
+      }
+      else {
+        id = getDomainId(opts);
+      }
+
+      return DnsStore.Domains.destroy(id).then(function () {
+        return devs[0] || {};
+      });
+    });
+  };
+
+  function getDomainId(domain, opts) {
+    opts = opts || {};
+    // TODO don't allow two devices to share the same ip?
+    // (no, because they could be behind the same firewall
     var id = domain.type
       + ':' + domain.name
-      + ':' + domain.value
-      + ':' + (domain.device || ANON)
       ;
+
+    if (!opts.old) {
+      id += ':' + domain.value;
+    }
+
+    if (domain.device) {
+      // Note: two devices could be behind the same ip,
+      // but we don't want to restrict adding both of them to the same domain
+      // (but we do need to filter them)
+      id += ':' + (domain.device || ANON);
+    }
+
+    /*
+    if (-1 !== ['A', 'AAAA'].indexOf(domain.type)) { // domain.device
+      id = domain.type
+        + ':' + domain.name
+        + ':' + (domain.device || ANON)
+        ;
+    }
+    else { // 'MX', 'CNAME', 'ANAME', 'TXT', 'SRV'
+      id = domain.type
+        + ':' + domain.name
+        + ':' + domain.value
+        ;
+    }
+    */
 
     return require('crypto').createHash('sha1').update(id).digest('base64')
       .replace(/=+/g, '').replace(/\+/g, '-').replace(/\//g, '_');
@@ -538,11 +827,47 @@ exports.create = function (conf, DnsStore, app) {
     });
   };
 
-  Devices.destroy = function (req, res) {
-    var promise = PromiseA.resolve().then(function () {
-      var token = req.user;
-      var dev = req.body;
-      var q = { device: dev.name, groupIdx: token.groupIdx };
+  Devices.restful.detach = function (req, res) {
+    var token = req.user;
+    var devicename = req.params.device || req.params.name;
+    var name = req.params.sld + '.' + req.params.tld;
+
+    if (req.params.sub) {
+      name = req.params.sub + '.' + name;
+    }
+
+    if (req.params.domain) {
+      name = req.params.domain;
+    }
+
+    Devices.destroy(token, devicename, name).then(function (domains) {
+      res.send({ records: domains });
+    }, function (err) {
+      console.error('Error: unexpected error in ddns/app.js');
+      console.error(err.stack || err);
+      res.send({ error: { message: 'INTERNAL ERROR (not your fault)' } });
+    });
+  };
+  Devices.restful.destroy = function (req, res) {
+    var token = req.user;
+    var devicename = req.params.name;
+
+    Devices.destroy(token, devicename).then(function (domains) {
+      res.send({ domains: domains });
+    }, function (err) {
+      console.error('Error: unexpected error in ddns/app.js');
+      console.error(err.stack || err);
+      res.send({ error: { message: 'INTERNAL ERROR (not your fault)' } });
+    });
+  };
+  Devices.destroy = function (token, devicename, name) {
+    return PromiseA.resolve().then(function () {
+      // TODO dbwrap should throw an error when undefined is used
+      var q = { device: devicename, groupIdx: token.groupIdx };
+
+      if (name) {
+        q.name = name;
+      }
 
       if (!token.groupIdx) {
         return PromiseA.reject(new Error("Sanity Fail: missing group id"));
@@ -555,14 +880,6 @@ exports.create = function (conf, DnsStore, app) {
           return domains;
         });
       });
-    });
-
-    promise.then(function (domains) {
-      res.send({ domains: domains });
-    }, function (err) {
-      console.error('Error: unexpected error in ddns/app.js');
-      console.error(err.stack || err);
-      res.send({ error: { message: 'INTERNAL ERROR (not your fault)' } });
     });
   };
 
@@ -596,11 +913,14 @@ exports.create = function (conf, DnsStore, app) {
   // server, store, host, port, publicDir, options
   app.get(   apiBase + '/public', logr, listDomains);
 
-  app.get(   apiBase + '/records', logr, expressJwt({ secret: pubPem }), Records.get);
-  app.post(  apiBase + '/records', logr, expressJwt({ secret: pubPem }), Records.update);
+  app.get(   apiBase + '/records', logr, expressJwt({ secret: pubPem }), Records.restful.get);
+  app.post(  apiBase + '/records', logr, expressJwt({ secret: pubPem }), Records.restful.update);
+  app.delete(apiBase + '/records/:name/:type/:value/:device?', logr, expressJwt({ secret: pubPem }), Records.restful.destroy);
 
   app.post(  apiBase + '/devices', logr, expressJwt({ secret: pubPem }), Devices.restful.update);
-  app.delete(apiBase + '/devices/:name', logr, expressJwt({ secret: pubPem }), Devices.destroy);
+  app.delete(apiBase + '/devices/:name', logr, expressJwt({ secret: pubPem }), Devices.restful.destroy);
+  app.delete(apiBase + '/devices/:name/:tld/:sld/:sub?', logr, expressJwt({ secret: pubPem }), Devices.restful.detach);
+  app.delete(apiBase + '/devices/:device/:domain', logr, expressJwt({ secret: pubPem }), Devices.restful.detach);
 
   app.post(  apiBase + '/dns/', logr, expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
   app.post(  apiBase + '/ddns', logr, expressJwt({ secret: pubPem }), ddnsTokenWall, ddnsUpdater);
