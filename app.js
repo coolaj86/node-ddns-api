@@ -168,8 +168,21 @@ exports.create = function (conf, DnsStore, app) {
     }
   }
 
-  function convertToRegistered(domain) {
-    return DnsStore.Domains.find({ zone: domain.zone }).then(function (oldDomains) {
+  function convertAllToRegistered(groupIdx) {
+    return DnsStore.Domains.find({ groupIdx: groupIdx }).then(function (domains) {
+      var zonesMap = {};
+
+      domains.forEach(function (domain) {
+        zonesMap[domain.zone] = true;
+      });
+
+      return PromiseA.all(Object.keys(zonesMap).map(function (zonename) {
+        return convertToRegistered(groupIdx, zonename);
+      }));
+    });
+  }
+  function convertToRegistered(groupIdx, zonename) {
+    return DnsStore.Domains.find({ zone: zonename }).then(function (oldDomains) {
       //
       // convert from unregistered to registered
       //
@@ -177,9 +190,10 @@ exports.create = function (conf, DnsStore, app) {
         if (d.groupIdx) {
           return PromiseA.resolve();
         }
-        d.groupIdx = domain.groupIdx;
+        d.groupIdx = groupIdx;
+        d.registered = true;
 
-        return DnsStore.Domains.upsert(domain.id, domain);
+        return DnsStore.Domains.upsert(d.id, d);
       }));
     });
 
@@ -203,19 +217,18 @@ exports.create = function (conf, DnsStore, app) {
     var err;
     var updatedAt = new Date().toISOString();
     var zone;
-
-    //console.log('DEBUG updates is an array', updates);
+    var groupsMap = {};
 
     if (!updates.every(function (update) {
-      if (!update.registered) {
+      if (!update.registered || !update.groupIdx) {
         err = new Error('Cannot mix old-style unregistered domains with new-style registered domains');
         return false;
       }
+      groupsMap[update.groupIdx] = true;
       if (!update.type) {
         update.type = 'A';
       }
       update.host = update.host || update.key || update.name || update.hostname;
-      // console.log('DEBUG app.js update.host', update.host);
 
       // TODO BUG XXX must test if address is ipv4 or ipv6
       // (my comcast connection is ipv6)
@@ -285,43 +298,39 @@ exports.create = function (conf, DnsStore, app) {
       return;
     }
 
-    promise = PromiseA.resolve();
+    //promise = PromiseA.resolve();
+    promise = PromiseA.all(Object.keys(groupsMap).map(function (groupIdx) {
+      return convertAllToRegistered(groupIdx);
+    }));
     domains.forEach(function (domain, i) {
       promise = promise.then(function () {
         domain.id = getDomainId(domain);
 
-        return convertToRegistered(domain).then(function () {
-          if (domain.destroy) {
-            return DnsStore.Domains.destroy(domain.id).then(function () {
-              return null;
-            }, function (/*err*/) {
-              // TODO trigger logger
-              updates[i] = {
-                error: { message: "db error for destroy '" + domain.name + "'" }
-              };
-            });
-          }
-
-          return DnsStore.Domains.upsert(domain.id, domain).then(function () {
-            updates[i] = {
-              type: domain.type
-            , name: (domain.zone !== domain.host) ? domain.host : ''
-            , value: domain.value
-            , ttl: domain.ttl
-            , priority: domain.priority
-            , updatedAt: updatedAt
-            , device: domain.device // TODO use global
-            , zone: domain.zone
-            , registered: domain.registered
-            , groupIdx: domain.groupIdx
-            // 'zone', 'name', 'type', 'value', 'device'
-            };
+        if (domain.destroy) {
+          return DnsStore.Domains.destroy(domain.id).then(function () {
+            return null;
           }, function (/*err*/) {
             // TODO trigger logger
             updates[i] = {
-              error: { message: "db error for '" + domain.name + "'" }
+              error: { message: "db error for destroy '" + domain.name + "'" }
             };
           });
+        }
+
+        return DnsStore.Domains.upsert(domain.id, domain).then(function () {
+          updates[i] = {
+            type: domain.type
+          , name: (domain.zone !== domain.host) ? domain.host : ''
+          , value: domain.value
+          , ttl: domain.ttl
+          , priority: domain.priority
+          , updatedAt: updatedAt
+          , device: domain.device // TODO use global
+          , zone: domain.zone
+          , registered: domain.registered
+          , groupIdx: domain.groupIdx
+          // 'zone', 'name', 'type', 'value', 'device'
+          };
         }, function (/*err*/) {
           // TODO trigger logger
           updates[i] = {
@@ -351,7 +360,6 @@ exports.create = function (conf, DnsStore, app) {
     */
 
     promise.then(function () {
-      //console.log('DEBUG response updates', updates);
       res.send(updates);
     }, function (err) {
       updates.push({
@@ -387,8 +395,6 @@ exports.create = function (conf, DnsStore, app) {
         update.type = 'A';
       }
       update.host = update.host || update.key || update.name || update.hostname;
-      // console.log('DEBUG app.js update.host', update.host);
-
       // TODO BUG XXX must test if address is ipv4 or ipv6
       // (my comcast connection is ipv6)
       update.value = update.value || update.answer || update.address || update.ip || update.myip
@@ -604,15 +610,71 @@ exports.create = function (conf, DnsStore, app) {
   , deviceUpdater
   );
   */
+  function getOtherRecords(data, zone, ignoreOwner) {
+    return function (recs) {
+      var query = {};
 
+      if (recs && recs.length) {
+        return recs;
+      }
+
+      if (zone) {
+        query.zone = zone;
+      }
+      if (!ignoreOwner && (data.groupIdx || data.accountIdx)) {
+        query.groupIdx = data.groupIdx || data.accountIdx;
+      }
+
+      return DnsStore.Domains.find(query);
+    };
+  }
+  Records.get = function (data) {
+    var bare;
+    var parts;
+    var first = true;
+    var promise1;
+
+    data.cn = data.cn || '';
+    bare = data.cn.replace(/^\*\./, '');
+    parts = bare.split('.');
+
+    if (data.groupIdx) {
+      promise1 = convertAllToRegistered(data.groupIdx);
+    }
+    else {
+      promise1 = PromiseA.resolve();
+    }
+
+    return promise1.then(function () {
+      var promise = PromiseA.resolve([]);
+
+      if (!data.cn) {
+        promise = promise.then(getOtherRecords(data, null));
+      }
+
+      // /(^|\.)daplie.me$/i.test(bare) ? parts.length >= 3 :
+      while (parts.length >= 2) {
+        promise = promise.then(getOtherRecords(data, parts.join('.'), first));
+        first = false;
+        parts.shift();
+      }
+
+      return promise.then(function (records) {
+        if (data.cn) {
+          records = records.filter(function (record) {
+            return bare === record.name
+              || record.name.substr(record.name.length - ('.' + bare).length) === ('.' + bare);
+          });
+        }
+
+        return records;
+      });
+    });
+  };
   Records.restful.get = function (req, res) {
     var token = (req.headers.authorization || req.query.token)
       .replace(/^(Bearer|JWT|Token)\s*/i, '');
     var data;
-    var bare;
-    var parts;
-    var promise = PromiseA.resolve([]);
-    var first = true;
 
     try {
       data = jwt.verify(token, pubPem);
@@ -625,57 +687,7 @@ exports.create = function (conf, DnsStore, app) {
       return;
     }
 
-    data.cn = data.cn || '';
-    bare = data.cn.replace(/^\*\./, '');
-    parts = bare.split('.');
-
-    function getOtherRecords(zone, ignoreOwner) {
-      return function (recs) {
-        var query = {};
-
-        if (recs.length) {
-          return recs;
-        }
-
-        if (zone) {
-          query.zone = zone;
-        }
-        if (!ignoreOwner && (data.groupIdx || data.accountIdx)) {
-          query.groupIdx = data.groupIdx || data.accountIdx;
-        }
-
-        //console.log('DEBUG query', query);
-        return DnsStore.Domains.find(query);
-      };
-    }
-
-    //console.log('DEBUG data', data);
-    //console.log('DEBUG parts', parts);
-
-    if (!data.cn) {
-      promise = promise.then(getOtherRecords(null));
-    }
-
-    // /(^|\.)daplie.me$/i.test(bare) ? parts.length >= 3 :
-    while (parts.length >= 2) {
-      //console.log('DEBUG zone', zone);
-      promise = promise.then(getOtherRecords(parts.join('.'), first));
-      first = false;
-      parts.shift();
-    }
-
-    promise.then(function (records) {
-      //console.log('DEBUG get records');
-      //console.log(data.cn);
-      //console.log(records);
-
-      if (data.cn) {
-        records = records.filter(function (record) {
-          return bare === record.name
-            || record.name.substr(record.name.length - ('.' + bare).length) === ('.' + bare);
-        });
-      }
-
+    return Records.get(data).then(function (records) {
       res.send({ records: records });
     }, function (err) {
       console.error('ERROR app.js Records.get');
@@ -793,17 +805,21 @@ exports.create = function (conf, DnsStore, app) {
         return addr.value;
       });
       */
+      return convertAllToRegistered(token.groupIdx).then(function () {
+        return DnsStore.Domains.find(q).then(function (domains) {
+          var domainsMap = {};
 
-      return DnsStore.Domains.find(q).then(function (domains) {
-        var domainsMap = {};
+          domains.forEach(function (domain) {
+            // for upgrade
+            deleters.push(domain.id);
+            domainsMap[domain.name || domain.zone] = domain;
+          });
 
-        domains.forEach(function (domain) {
-          // for upgrade
-          deleters.push(domain.id);
-          domainsMap[domain.name] = domain;
+          domainnames = Object.keys(domainsMap);
+
+          return domainsMap;
         });
-
-        domainnames = Object.keys(domainsMap);
+      }).then(function (domainsMap) {
 
         domainnames.forEach(function (domainname) {
           addresses.forEach(function (addr) {
@@ -835,7 +851,6 @@ exports.create = function (conf, DnsStore, app) {
         });
 
         // either A (do nothing) or B (add and destroy)
-        // console.log('DEBUG app.js placers', placers);
         return PromiseA.all(placers.map(function (r) {
           return DnsStore.Domains.upsert(r);
         })).then(function () {
@@ -883,7 +898,7 @@ exports.create = function (conf, DnsStore, app) {
   Devices.destroy = function (token, devicename, name) {
     return PromiseA.resolve().then(function () {
       // TODO dbwrap should throw an error when undefined is used
-      var q = { device: devicename, groupIdx: token.groupIdx };
+      var q = { /*device: devicename,*/ groupIdx: token.groupIdx };
 
       if (name) {
         q.name = name;
@@ -893,11 +908,17 @@ exports.create = function (conf, DnsStore, app) {
         return PromiseA.reject(new Error("Sanity Fail: missing group id"));
       }
 
-      return DnsStore.Domains.find(q).then(function (domains) {
-        return PromiseA.all(domains.map(function (domain) {
-          return DnsStore.Domains.destroy(domain.id);
-        })).then(function () {
-          return domains;
+      return convertAllToRegistered(token.groupIdx).then(function () {
+
+        return DnsStore.Domains.find(q).then(function (domains) {
+          domains = domains.filter(function (d) {
+            return d.device === devicename;
+          });
+          return PromiseA.all(domains.map(function (domain) {
+            return DnsStore.Domains.destroy(domain.id);
+          })).then(function () {
+            return domains;
+          });
         });
       });
     });
