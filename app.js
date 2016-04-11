@@ -168,14 +168,43 @@ exports.create = function (conf, DnsStore, app) {
     }
   }
 
+  function convertToRegistered(domain) {
+    return DnsStore.Domains.find({ zone: domain.zone }).then(function (oldDomains) {
+      //
+      // convert from unregistered to registered
+      //
+      return PromiseA.all(oldDomains.map(function (d) {
+        if (d.groupIdx) {
+          return PromiseA.resolve();
+        }
+        d.groupIdx = domain.groupIdx;
+
+        return DnsStore.Domains.upsert(domain.id, domain);
+      }));
+    });
+
+    //var registered = oldDomains.some(function (d) { return d.registered; });
+
+    /*
+    if (oldDomains.length && !registered) {
+      return PromiseA.reject({
+        message: "Error: This domain was registered with `ddns` which is available via `npm install -g ddns`."
+          + " It cannot be used with `daplie` yet and must be converted manually."
+          + " Open an issue at https://github.com/Daplie/daplie-tools for help."
+      });
+    }
+    */
+  }
+
   function ddnsUpdaterNew(req, res, updates) {
-    console.log('DEBUG ddnsUpdaterNew');
     var promise;
     var domains = [];
     var domain;
     var err;
     var updatedAt = new Date().toISOString();
     var zone;
+
+    //console.log('DEBUG updates is an array', updates);
 
     if (!updates.every(function (update) {
       if (!update.registered) {
@@ -261,17 +290,7 @@ exports.create = function (conf, DnsStore, app) {
       promise = promise.then(function () {
         domain.id = getDomainId(domain);
 
-        return DnsStore.Domains.find({ zone: domain.zone }).then(function (oldDomains) {
-          var registered = oldDomains.some(function (d) { return d.registered; });
-
-          if (oldDomains.length && !registered) {
-            return PromiseA.reject({
-              message: "Error: This domain was registered with `ddns` which is available via `npm install -g ddns`."
-                + " It cannot be used with `daplie` yet and must be converted manually."
-                + " Open an issue at https://github.com/Daplie/daplie-tools for help."
-            });
-          }
-
+        return convertToRegistered(domain).then(function () {
           if (domain.destroy) {
             return DnsStore.Domains.destroy(domain.id).then(function () {
               return null;
@@ -332,6 +351,7 @@ exports.create = function (conf, DnsStore, app) {
     */
 
     promise.then(function () {
+      //console.log('DEBUG response updates', updates);
       res.send(updates);
     }, function (err) {
       updates.push({
@@ -344,7 +364,6 @@ exports.create = function (conf, DnsStore, app) {
   // OLD
   //
   function ddnsUpdaterOld(req, res, updates) {
-    console.log('DEBUG ddnsUpdaterOld');
     var promise;
     var domains = [];
     var domain;
@@ -358,8 +377,6 @@ exports.create = function (conf, DnsStore, app) {
       } });
       return;
     }
-
-    console.log('DEBUG updates is an array', updates);
 
     if (!updates.every(function (update) {
       if (update.registered) {
@@ -434,21 +451,25 @@ exports.create = function (conf, DnsStore, app) {
 
       return true;
     })) {
-      console.log('DEBUG err', err);
+      console.error('DEBUG Error dns/app.js');
+      console.error(err);
       res.status(500).send(err);
       return;
     }
 
-    console.log('DEBUG updates are valid');
-    // console.log(updates);
-    //console.log('DEBUG domains', domains);
-
     promise = PromiseA.resolve();
     domains.forEach(function (domain, i) {
+      console.log(
+        'DEBUG [OLD] ddns'
+      , domain.zone
+      , domain.type
+      , (domain.name || '').substr(0, (domain.zone.length - (domain.name.length + 1)))
+      , domain.device
+      , domain.value
+      );
       promise = promise.then(function () {
         domain.id = getDomainId(domain, { old: true });
 
-        console.log('DEBUG domain.zone', domain.zone);
         return DnsStore.Domains.find({ zone: domain.zone }).then(function (existingDomains) {
           var registered = existingDomains.some(function (d) { return d.registered; });
           var oldDomains = existingDomains.filter(function (d) { return (domain.host === d.name || domain.host === d.zone) && domain.type === d.type; });
@@ -463,7 +484,6 @@ exports.create = function (conf, DnsStore, app) {
             });
           }
 
-          console.log('DEBUG oldDomains', oldDomains);
           if (oldDomains.length) {
             // existing registration
             if (oldDomains[0].email && (oldDomains[0].email !== domain.email)) {
@@ -891,6 +911,7 @@ exports.create = function (conf, DnsStore, app) {
       rows.forEach(function (row) {
         // don't expose idx or email addresses
         row.accountIdx = undefined;
+        row.groupIdx = undefined;
         row.email = undefined;
 
         Object.keys(row).forEach(function (key) {
