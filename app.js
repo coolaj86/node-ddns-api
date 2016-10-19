@@ -702,8 +702,8 @@ exports.create = function (conf, DnsStore, app) {
   Records.restful.destroy = function (req, res) {
     /*
     req.params.name
-    req.params.type
-    req.params.value
+    req.params.type?
+    req.params.value?
     req.params.device?
     */
     Records.destroy(req, req.params).then(function (record) {
@@ -716,7 +716,16 @@ exports.create = function (conf, DnsStore, app) {
   };
   Records.destroy = function (req, opts) {
     // opts = { name, type, value, device };
-    var query = { name: opts.name, value: opts.value };
+    var query = { name: opts.name };
+    if (opts.type) {
+      query.type = opts.type;
+    }
+    if (opts.value) {
+      query.value = opts.value;
+    }
+    if (opts.device) {
+      query.device = opts.device;
+    }
 
     return DnsStore.Domains.find(query).then(function (devs) {
       var id;
@@ -875,6 +884,7 @@ exports.create = function (conf, DnsStore, app) {
       name = req.params.domain;
     }
 
+    //console.log('[com.daplie.ns] Devices.restful.detach name:', name);
     Devices.destroy(token, devicename, name).then(function (domains) {
       res.send({ records: domains });
     }, function (err) {
@@ -914,6 +924,11 @@ exports.create = function (conf, DnsStore, app) {
           domains = domains.filter(function (d) {
             return d.device === devicename;
           });
+
+          //console.log('[com.daplie.ns] Devices.destory domains:', devicename);
+          //console.log(domains);
+          //console.log('');
+
           return PromiseA.all(domains.map(function (domain) {
             return DnsStore.Domains.destroy(domain.id);
           })).then(function () {
@@ -958,6 +973,8 @@ exports.create = function (conf, DnsStore, app) {
   app.get(   apiBase + '/records', logr, expressJwt({ secret: pubPem }), Records.restful.get);
   app.post(  apiBase + '/records', logr, expressJwt({ secret: pubPem }), Records.restful.update);
   app.delete(apiBase + '/records/:name/:type/:value/:device?', logr, expressJwt({ secret: pubPem }), Records.restful.destroy);
+  app.delete(apiBase + '/records/:name/:type/:value?', logr, expressJwt({ secret: pubPem }), Records.restful.destroy);
+  app.delete(apiBase + '/records/:name/:type?', logr, expressJwt({ secret: pubPem }), Records.restful.destroy);
 
   app.post(  apiBase + '/devices', logr, expressJwt({ secret: pubPem }), Devices.restful.update);
   app.delete(apiBase + '/devices/:name', logr, expressJwt({ secret: pubPem }), Devices.restful.destroy);
